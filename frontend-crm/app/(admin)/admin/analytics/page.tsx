@@ -1,3 +1,4 @@
+export const dynamic = "force-dynamic";
 import { BarChart3, TrendingUp, Users, Clock, Phone, Activity } from "lucide-react";
 import { getCurrentAdminTenant } from "@/lib/actions/admin";
 import { Lead } from "@/lib/models"; 
