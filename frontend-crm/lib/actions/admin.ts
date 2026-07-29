@@ -215,13 +215,13 @@ export async function uploadCampaignLeads(campaignId: string, leads: { name: str
 
     await connectToDatabase();
 
-    // 🚨 FIXED: Mapping leads to tenantId
+    // 🚨 FIXED: Mapping leads to 'New' to match your Mongoose enum
     const leadDocs = leads.map(lead => ({
       tenantId: tenant.orgId, 
       campaignId: campaignId,
       name: lead.name,
       phone: lead.phone,
-      status: 'pending' 
+      status: 'New' // Changed from 'pending' to 'New'
     }));
 
     try {
@@ -263,11 +263,11 @@ export async function startCampaignCalls(campaignId: string) {
 
     if (!vapiKey) return { success: false, error: "No Vapi API key configured." };
 
-    // 🚨 FIXED: Querying pending leads by tenantId
+    // 🚨 FIXED: Querying leads by 'New' status
     const pendingLeads = await Lead.find({ 
       campaignId, 
       tenantId: tenant.orgId, 
-      status: 'pending'      
+      status: 'New' // Changed from 'pending' to 'New'     
     }).sort({ createdAt: 1 }); 
 
     if (pendingLeads.length === 0) return { success: false, error: "No pending leads to call." };
@@ -276,13 +276,13 @@ export async function startCampaignCalls(campaignId: string) {
 
     await Lead.updateMany(
       { _id: { $in: pendingLeads.map(l => l._id) } },
-      { $set: { status: 'pending' } }
+      { $set: { status: 'Queued' } } // Changed from 'pending' to 'Queued'
     );
 
     const firstLead = pendingLeads[0];
 
     try {
-      await Lead.findByIdAndUpdate(firstLead._id, { status: 'calling' });
+      await Lead.findByIdAndUpdate(firstLead._id, { status: 'Calling' }); // Changed to capital 'Calling'
 
       const ASSISTANT_ID = "591db43a-b673-4aa2-b1e0-d39c3b60eeef";
       const PHONE_NUMBER_ID = "6b926cfa-66c7-422c-9161-20445e21f435";
@@ -317,13 +317,13 @@ export async function startCampaignCalls(campaignId: string) {
       if (!vapiResponse.ok) {
         const errorData = await vapiResponse.json();
         console.error(`Vapi failed to start campaign on first lead:`, errorData);
-        await Lead.findByIdAndUpdate(firstLead._id, { status: 'pending' });
+        await Lead.findByIdAndUpdate(firstLead._id, { status: 'New' });
         return { success: false, error: "Vapi rejected the first call." };
       }
 
     } catch (err) {
       console.error(`Network error starting campaign:`, err);
-      await Lead.findByIdAndUpdate(firstLead._id, { status: 'pending' });
+      await Lead.findByIdAndUpdate(firstLead._id, { status: 'New' });
       return { success: false, error: "Network error triggering Vapi." };
     }
 
