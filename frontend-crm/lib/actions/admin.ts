@@ -100,14 +100,14 @@ export async function getAdminDashboardStats(tenantId: string) {
   try {
     await connectToDatabase();
     
-    // 🚨 MATCH LEAD DB FIELD
+    // 🚨 FIXED: Querying by tenantId instead of college
     const [totalLeads, activeCampaigns, completedCalls] = await Promise.all([
-      Lead.countDocuments({ college: tenantId }),
-      Campaign.countDocuments({ college: tenantId, status: 'Active' }),
-      Lead.countDocuments({ college: tenantId, status: { $in: ['Called', 'Converted', 'not_interested', 'qualified', 'transferred', 'enrolled'] } })
+      Lead.countDocuments({ tenantId: tenantId }),
+      Campaign.countDocuments({ tenantId: tenantId, status: 'Active' }),
+      Lead.countDocuments({ tenantId: tenantId, status: { $in: ['Called', 'Converted', 'not_interested', 'qualified', 'transferred', 'enrolled'] } })
     ]);
 
-    const convertedCount = await Lead.countDocuments({ college: tenantId, status: { $in: ['Converted', 'qualified', 'enrolled'] } });
+    const convertedCount = await Lead.countDocuments({ tenantId: tenantId, status: { $in: ['Converted', 'qualified', 'enrolled'] } });
     const conversionRate = completedCalls > 0 ? ((convertedCount / completedCalls) * 100).toFixed(1) : "0.0";
 
     return {
@@ -131,8 +131,8 @@ export async function getAdminCampaigns() {
 
     await connectToDatabase();
     
-    // 🚨 MATCH CAMPAIGN DB FIELD
-    const campaigns = await Campaign.find({ college: tenant.orgId })
+    // 🚨 FIXED: Searching by tenantId
+    const campaigns = await Campaign.find({ tenantId: tenant.orgId })
       .sort({ createdAt: -1 })
       .lean();
       
@@ -153,9 +153,9 @@ export async function createNewCampaign(formData: FormData) {
 
     const name = formData.get("name") as string;
 
+    // 🚨 FIXED: Saving exact tenantId expected by the Schema
     await Campaign.create({
-      tenantId: tenant.orgId,
-      college: tenant.orgId, // 🚨 MATCH CAMPAIGN DB FIELD
+      tenantId: tenant.orgId, 
       name,
       status: 'Draft',
       totalLeads: 0,
@@ -171,7 +171,7 @@ export async function createNewCampaign(formData: FormData) {
   }
 }
 
-// 5. Fetch a Single Campaign by ID (BULLETPROOF VERSION)
+// 5. Fetch a Single Campaign by ID
 export async function getCampaignById(campaignId: string) {
   try {
     await connectToDatabase();
@@ -181,7 +181,6 @@ export async function getCampaignById(campaignId: string) {
     const campaign = allCampaigns.find((c: any) => c._id.toString() === cleanId);
     
     if (!campaign) {
-      console.log(`❌ Campaign not found in memory match for ID: ${cleanId}`);
       return null;
     }
     
@@ -192,7 +191,7 @@ export async function getCampaignById(campaignId: string) {
   }
 }
 
-// 6. Fetch Leads for a specific Campaign (BULLETPROOF VERSION)
+// 6. Fetch Leads for a specific Campaign
 export async function getCampaignLeads(campaignId: string) {
   try {
     await connectToDatabase();
@@ -208,7 +207,7 @@ export async function getCampaignLeads(campaignId: string) {
   }
 }
 
-// 7. Upload CSV Leads to a Campaign (MULTI-TENANT SAFE)
+// 7. Upload CSV Leads to a Campaign
 export async function uploadCampaignLeads(campaignId: string, leads: { name: string, phone: string }[]) {
   try {
     const tenant = await getCurrentAdminTenant();
@@ -216,25 +215,22 @@ export async function uploadCampaignLeads(campaignId: string, leads: { name: str
 
     await connectToDatabase();
 
-    // 1. Format the leads for MongoDB
+    // 🚨 FIXED: Mapping leads to tenantId
     const leadDocs = leads.map(lead => ({
-      college: tenant.orgId, // 🚨 CRITICAL: Make sure this says college to match schema
+      tenantId: tenant.orgId, 
       campaignId: campaignId,
       name: lead.name,
       phone: lead.phone,
-      status: 'pending' // 🚨 CRITICAL: Use correct status from schema
+      status: 'pending' 
     }));
 
     try {
       await Lead.insertMany(leadDocs, { ordered: false });
     } catch (insertError: any) {
-      if (insertError.code !== 11000) {
-        throw insertError; 
-      }
-      console.log("Skipped some duplicate leads within this tenant.");
+      if (insertError.code !== 11000) throw insertError; 
     }
 
-    const actualLeadCount = await Lead.countDocuments({ campaignId, college: tenant.orgId });
+    const actualLeadCount = await Lead.countDocuments({ campaignId, tenantId: tenant.orgId });
     
     await Campaign.findByIdAndUpdate(campaignId, {
       totalLeads: actualLeadCount
@@ -251,7 +247,7 @@ export async function uploadCampaignLeads(campaignId: string, leads: { name: str
   }
 }
 
-// 8. Trigger Vapi AI Outbound Calls (SEQUENTIAL RELAY START)
+// 8. Trigger Vapi AI Outbound Calls
 export async function startCampaignCalls(campaignId: string) {
   try {
     const tenant = await getCurrentAdminTenant();
@@ -265,20 +261,16 @@ export async function startCampaignCalls(campaignId: string) {
       vapiKey = globalConfig?.masterApiKeys?.vapi;
     }
 
-    if (!vapiKey) {
-      return { success: false, error: "No Vapi API key configured." };
-    }
+    if (!vapiKey) return { success: false, error: "No Vapi API key configured." };
 
-    // 2. Fetch ALL pending leads and mark them as 'Queued'
+    // 🚨 FIXED: Querying pending leads by tenantId
     const pendingLeads = await Lead.find({ 
       campaignId, 
-      college: tenant.orgId, // 🚨 MATCH LEAD DB FIELD
-      status: 'pending'      // 🚨 USE SCHEMA STATUS
+      tenantId: tenant.orgId, 
+      status: 'pending'      
     }).sort({ createdAt: 1 }); 
 
-    if (pendingLeads.length === 0) {
-      return { success: false, error: "No pending leads to call." };
-    }
+    if (pendingLeads.length === 0) return { success: false, error: "No pending leads to call." };
 
     await Campaign.findByIdAndUpdate(campaignId, { status: 'active' });
 
@@ -295,7 +287,6 @@ export async function startCampaignCalls(campaignId: string) {
       const ASSISTANT_ID = "591db43a-b673-4aa2-b1e0-d39c3b60eeef";
       const PHONE_NUMBER_ID = "6b926cfa-66c7-422c-9161-20445e21f435";
 
-      // Trigger the VERY FIRST call
       const vapiResponse = await fetch('https://api.vapi.ai/call/phone', {
         method: 'POST',
         headers: {
@@ -309,8 +300,6 @@ export async function startCampaignCalls(campaignId: string) {
             number: firstLead.phone,
             name: firstLead.name,
           },
-          // 🚨 THE MAGIC FIX: We only send `variableValues`. 
-          // This keeps your Vapi Dashboard tools, models, and transcriber 100% untouched!
           assistantOverrides: {
             variableValues: {
               collegeName: tenant.name || "Our University",
@@ -358,7 +347,8 @@ export async function getAllAdminLeads() {
 
     await connectToDatabase();
     
-    const leads = await Lead.find({ college: tenant.orgId }) // 🚨 MATCH LEAD DB FIELD
+    // 🚨 FIXED: Querying leads by tenantId
+    const leads = await Lead.find({ tenantId: tenant.orgId })
       .sort({ createdAt: -1 })
       .lean();
       
