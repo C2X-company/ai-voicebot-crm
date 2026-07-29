@@ -154,6 +154,7 @@ export async function createNewCampaign(formData: FormData) {
     const name = formData.get("name") as string;
 
     await Campaign.create({
+      tenantId: tenant.orgId,
       college: tenant.orgId, // 🚨 MATCH CAMPAIGN DB FIELD
       name,
       status: 'Draft',
