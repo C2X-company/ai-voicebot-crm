@@ -1,29 +1,26 @@
 import { NextResponse } from 'next/server';
 import { connectToDatabase } from '@/lib/db';
-import { Campaign, Lead } from '@/lib/models'; 
+import { Campaign, Lead, Tenant, PlatformConfig } from '@/lib/models'; 
 
-// 🚀 THE FIX: A Deep-Search helper that finds your data NO MATTER WHERE Vapi hides it
+// Deep-Search helper
 function extractData(obj: any, targetName: string): string | null {
   let foundValue: string | null = null;
   
   function search(current: any) {
     if (!current || typeof current !== 'object') return;
     
-    // Pattern 1: Direct key-value {"intentScore": "Hot"}
     if (current[targetName] && typeof current[targetName] === 'string') {
       foundValue = current[targetName];
       return;
     }
     
-    // Pattern 2: Vapi UUID map {"uuid": { name: "intentScore", result: "Hot" }}
     if (current.name === targetName && current.result) {
       foundValue = current.result;
       return;
     }
     
-    // Recursive drill-down
     for (const key in current) {
-      if (foundValue) return; // Stop searching if we already found it
+      if (foundValue) return;
       search(current[key]);
     }
   }
@@ -41,7 +38,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ received: true }, { status: 200 });
     }
 
-    const message = body.message;
+    const message = body.message || {};
     const callData = message.call || {};
     
     let customerNumber = callData.customer?.number || message.customer?.number;
@@ -80,16 +77,38 @@ export async function POST(req: Request) {
       }
 
       // 2. Extract Transcript
-      const fullTranscript = message.transcript || "";
+      const fullTranscript = message.transcript || callData.transcript || "";
 
-      // 3. Extract Summary & Intent & Audio
+      // 3. 🚨 FIX: Extract Summary (Direct Check first, then deep search, then transcript fallback)
+      let callSummary = 
+        message.analysis?.summary || 
+        message.summary || 
+        callData.analysis?.summary || 
+        extractData(body, 'summary') || 
+        "";
+
+      // Fallback summary generation if Vapi didn't provide one
+      if (!callSummary && fullTranscript) {
+        const lines = fullTranscript.split('\n').filter((l: string) => l.trim());
+        if (lines.length > 0) {
+          callSummary = `Call completed (${durationSeconds}s). ${lines.slice(0, 3).join(' ')}`;
+        }
+      }
+
+      // 4. 🚨 FIX: Extract Audio Recording URL (Prefer public/stereo over private R2 HIPAA URLs)
+      let audioUrl = 
+        message.stereoRecordingUrl || 
+        message.recordingUrl || 
+        callData.stereoRecordingUrl || 
+        callData.recordingUrl || 
+        message.artifact?.stereoRecordingUrl || 
+        message.artifact?.recordingUrl || 
+        extractData(body, 'stereoRecordingUrl') || 
+        extractData(body, 'recordingUrl') || 
+        "";
+
+      // 5. Calculate Intent
       const rawIntent = extractData(body, 'intentScore');
-      let callSummary = extractData(body, 'summary') || "";
-      
-      // 🚨 FIX: Use the Deep-Search helper to hunt down the MP3 link!
-      let audioUrl = extractData(body, 'recordingUrl') || message.recordingUrl || callData.recordingUrl || "";
-
-      // 4. Calculate Intent
       let intent: 'Hot' | 'Warm' | 'Cold' = 'Cold'; // Default
       
       if (rawIntent) {
@@ -100,23 +119,25 @@ export async function POST(req: Request) {
       } 
       
       if (intent === 'Cold') {
-          const summaryLower = callSummary.toLowerCase();
-          if (summaryLower.includes('very interested') || summaryLower.includes('apply') || summaryLower.includes('transfer')) {
-            intent = 'Hot';
-          } else if (summaryLower.includes('interested') || summaryLower.includes('fee')) {
-            intent = 'Warm';
-          }
+        const summaryLower = (callSummary + " " + fullTranscript).toLowerCase();
+        if (summaryLower.includes('very interested') || summaryLower.includes('apply') || summaryLower.includes('transfer')) {
+          intent = 'Hot';
+        } else if (summaryLower.includes('interested') || summaryLower.includes('fee') || summaryLower.includes('admission')) {
+          intent = 'Warm';
+        }
       }
 
-      // 🚨 FIX: Extract the orgId that we passed to Vapi when we started the call
+      // Extract tenant/org ID
       const activeOrgId = callData.metadata?.orgId || message.call?.metadata?.orgId;
       
       console.log(`Attempting to update lead: ${customerNumber} for Org: ${activeOrgId}`);
-      // 5. Update the Current Lead in MongoDB
+      
+      // Update Lead in MongoDB
       const updatedLead = await Lead.findOneAndUpdate(
-        { phone: customerNumber,
-          tenantId: activeOrgId // 🚨 CRITICAL FIX
-         },
+        { 
+          phone: customerNumber,
+          ...(activeOrgId ? { tenantId: activeOrgId } : {})
+        },
         {
           status: intent === 'Hot' ? 'Converted' : 'Called',
           intentScore: intent,
@@ -130,19 +151,12 @@ export async function POST(req: Request) {
       
       console.log(`✅ Webhook processed for ${customerNumber}: ${intent} Lead. Duration: ${durationSeconds}s`);
 
-      // 🚨 NEW: 5.5 Update the Campaign Stats!
+      // Update Campaign Stats
       if (updatedLead && updatedLead.campaignId) {
-        // If the lead was converted, we increase both completedCalls AND converted count
-        const isConverted = updatedLead.status === 'Converted';
-        
-        // Find the campaign and increment completedCalls by 1
         await Campaign.findByIdAndUpdate(updatedLead.campaignId, {
-          $inc: { 
-            completedCalls: 1 
-          }
+          $inc: { completedCalls: 1 }
         });
         
-        // Let's recalculate the conversion rate for the campaign
         const campaignStats = await Campaign.findById(updatedLead.campaignId);
         if (campaignStats) {
            const allConverted = await Lead.countDocuments({ 
@@ -164,10 +178,8 @@ export async function POST(req: Request) {
       // ─────────────────────────────────────────────────────────────────
       // 6. THE SEQUENTIAL RELAY PASS (Trigger the next call)
       // ─────────────────────────────────────────────────────────────────
-      
       if (updatedLead) {
         try {
-          // Lock the query to ONLY the current campaign to prevent crossing wires
           const nextLead = await Lead.findOne({ 
             status: 'Queued',
             campaignId: updatedLead.campaignId
@@ -176,22 +188,30 @@ export async function POST(req: Request) {
           if (nextLead) {
             console.log(`📞 Passing the baton! Next lead is: ${nextLead.phone}`);
             
-            // Mark as calling so we don't double-dial
             await Lead.findByIdAndUpdate(nextLead._id, { status: 'Calling' });
 
-            // 🚨 THE CRITICAL DELAY: Wait 3 seconds for the telecom channel to clear!
-            console.log(`⏳ Waiting 3 seconds to prevent Exotel/Twilio channel overlap...`);
+            console.log(`⏳ Waiting 3 seconds to prevent channel overlap...`);
             await new Promise(resolve => setTimeout(resolve, 3000));
 
-            const VAPI_KEY = process.env.VAPI_KEY || "4cacfd17-5214-43d6-b3d5-7aab7e4a1596";
-            const ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID || "591db43a-b673-4aa2-b1e0-d39c3b60eeef";
-            const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "6b926cfa-66c7-422c-9161-20445e21f435";
+            // Fetch keys for relay call
+            let vapiKey = process.env.VAPI_KEY;
+            if (!vapiKey) {
+              const tenant = await Tenant.findOne({ orgId: updatedLead.tenantId }).lean();
+              vapiKey = tenant?.apiKeys?.vapi;
+              if (!vapiKey) {
+                const globalConfig = await PlatformConfig.findOne().lean();
+                vapiKey = globalConfig?.masterApiKeys?.vapi;
+              }
+            }
 
-            // Fire the Vapi API
+            // 🚨 UPDATED: New Assistant & Phone IDs
+            const ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID || "b9e32915-6885-4814-819f-3f32d179ee67";
+            const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID || "5900a887-8044-4953-a946-f46d7d7cf74b";
+
             const vapiResponse = await fetch('https://api.vapi.ai/call/phone', {
               method: 'POST',
               headers: {
-                'Authorization': `Bearer ${VAPI_KEY}`,
+                'Authorization': `Bearer ${vapiKey}`,
                 'Content-Type': 'application/json',
               },
               body: JSON.stringify({
@@ -201,17 +221,15 @@ export async function POST(req: Request) {
                   number: nextLead.phone,
                   name: nextLead.name
                 },
-                // 🚨 ADD THIS: Pass the Organization ID to Vapi
-              metadata: {
-                  orgId: updatedLead.tenantId // This is the Clerk orgId saved on the lead!
-              }
+                metadata: {
+                  orgId: updatedLead.tenantId
+                }
               }),
             });
 
             if (!vapiResponse.ok) {
               const errData = await vapiResponse.text();
-              console.error(`❌ Relay API rejected the call for ${nextLead.phone}:`, errData);
-              // Revert status on failure so it can be retried later
+              console.error(`❌ Relay API rejected call for ${nextLead.phone}:`, errData);
               await Lead.findByIdAndUpdate(nextLead._id, { status: 'Queued' });
             } else {
               console.log(`✅ Next call triggered successfully!`);
