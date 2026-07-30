@@ -284,8 +284,8 @@ export async function startCampaignCalls(campaignId: string) {
     try {
       await Lead.findByIdAndUpdate(firstLead._id, { status: 'Calling' }); // Changed to capital 'Calling'
 
-      const ASSISTANT_ID = "591db43a-b673-4aa2-b1e0-d39c3b60eeef";
-      const PHONE_NUMBER_ID = "6b926cfa-66c7-422c-9161-20445e21f435";
+      const ASSISTANT_ID = "b9e32915-6885-4814-819f-3f32d179ee67";
+      const PHONE_NUMBER_ID = "5900a887-8044-4953-a946-f46d7d7cf74b";
 
       const vapiResponse = await fetch('https://api.vapi.ai/call/phone', {
         method: 'POST',
